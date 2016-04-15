@@ -39,17 +39,17 @@ using swift::remote::RemoteAddress;
 template <typename Iterator>
 class ReflectionSection {
   using const_iterator = Iterator;
-  const void * const Begin;
-  const void * const End;
+  const void * Begin;
+  const void * End;
 
 public:
-  ReflectionSection(const void * const Begin,
-                    const void * const End)
+  ReflectionSection(const void * Begin,
+                    const void * End)
   : Begin(Begin), End(End) {}
 
   ReflectionSection(uint64_t Begin, uint64_t End)
-  : Begin(reinterpret_cast<const void * const>(Begin)),
-  End(reinterpret_cast<const void * const>(End)) {}
+  : Begin(reinterpret_cast<const void *>(Begin)),
+    End(reinterpret_cast<const void *>(End)) {}
 
   void *startAddress() {
     return const_cast<void *>(Begin);
@@ -177,14 +177,16 @@ public:
 
 using FieldSection = ReflectionSection<FieldDescriptorIterator>;
 using AssociatedTypeSection = ReflectionSection<AssociatedTypeIterator>;
+using BuiltinTypeSection = ReflectionSection<BuiltinTypeDescriptorIterator>;
 using GenericSection = ReflectionSection<const void *>;
 
 struct ReflectionInfo {
   std::string ImageName;
   FieldSection fieldmd;
   AssociatedTypeSection assocty;
-  GenericSection reflstr;
+  BuiltinTypeSection builtin;
   GenericSection typeref;
+  GenericSection reflstr;
 };
 
 
@@ -206,16 +208,16 @@ private:
   void dumpTypeRef(const std::string &MangledName,
                    std::ostream &OS, bool printTypeName = false) {
     auto TypeName = Demangle::demangleTypeAsString(MangledName);
-    OS << TypeName << std::endl;
+    OS << TypeName << '\n';
 
     auto DemangleTree = Demangle::demangleTypeAsNode(MangledName);
     auto TR = decodeMangledType(DemangleTree);
     if (!TR) {
-      OS << "!!! Invalid typeref: " << MangledName << std::endl;
+      OS << "!!! Invalid typeref: " << MangledName << '\n';
       return;
     }
     TR->dump(OS);
-    OS << std::endl;
+    OS << '\n';
   }
 
   const AssociatedTypeDescriptor *
@@ -259,13 +261,18 @@ public:
       for (const auto &descriptor : sections.fieldmd) {
         auto TypeName
           = Demangle::demangleTypeAsString(descriptor.getMangledTypeName());
-        OS << TypeName << std::endl;
+        OS << TypeName << '\n';
         for (size_t i = 0; i < TypeName.size(); ++i)
           OS << '-';
-        OS << std::endl;
+        OS << '\n';
         for (auto &field : descriptor) {
-          OS << field.getFieldName() << ": ";
-          dumpTypeRef(field.getMangledTypeName(), OS);
+          OS << field.getFieldName();
+          if (field.hasMangledTypeName()) {
+            OS << ": ";
+            dumpTypeRef(field.getMangledTypeName(), OS);
+          } else {
+            OS << "\n\n";
+          }
         }
       }
     }
@@ -279,8 +286,8 @@ public:
         auto protocolName = Demangle::demangleTypeAsString(
           descriptor.getMangledProtocolTypeName());
 
-        OS << conformingTypeName << " : " << protocolName;
-        OS << std::endl;
+        OS << "- " << conformingTypeName << " : " << protocolName;
+        OS << '\n';
 
         for (const auto &associatedType : descriptor) {
           OS << "typealias " << associatedType.getName() << " = ";
@@ -290,16 +297,34 @@ public:
     }
   }
 
+  void dumpBuiltinTypeSection(std::ostream &OS) {
+    for (const auto &sections : ReflectionInfos) {
+      for (const auto &descriptor : sections.builtin) {
+        auto typeName = Demangle::demangleTypeAsString(
+          descriptor.getMangledTypeName());
+
+        OS << "\n- " << typeName << ":\n";
+        OS << "Size: " << descriptor.Size << "\n";
+        OS << "Alignment: " << descriptor.Alignment << "\n";
+        OS << "Stride: " << descriptor.Stride << "\n";
+        OS << "NumExtraInhabitants: " << descriptor.NumExtraInhabitants << "\n";
+      }
+    }
+  }
+
   void dumpAllSections(std::ostream &OS) {
-    OS << "FIELDS:" << std::endl;
-    for (size_t i = 0; i < 7; ++i) OS << '=';
-    OS << std::endl;
+    OS << "FIELDS:\n";
+    OS << "=======\n";
     dumpFieldSection(OS);
-    OS << "\nASSOCIATED TYPES:" << std::endl;
-    for (size_t i = 0; i < 17; ++i) OS << '=';
-    OS << std::endl;
+    OS << '\n';
+    OS << "ASSOCIATED TYPES:\n";
+    OS << "=================\n";
     dumpAssociatedTypeSection(OS);
-    OS << std::endl;
+    OS << '\n';
+    OS << "BUILTIN TYPES:\n";
+    OS << "==============\n";
+    dumpBuiltinTypeSection(OS);
+    OS << '\n';
   }
 
   TypeRef *
@@ -340,13 +365,21 @@ public:
         if (MangledName.compare(CandidateMangledName) != 0)
           continue;
         for (auto &Field : FieldDescriptor) {
+          auto FieldName = Field.getFieldName();
+
+          // Empty cases of enums do not have a type
+          if (!Field.hasMangledTypeName()) {
+            Fields.push_back({FieldName, nullptr});
+            continue;
+          }
+
           auto Demangled
-          = Demangle::demangleTypeAsNode(Field.getMangledTypeName());
+            = Demangle::demangleTypeAsNode(Field.getMangledTypeName());
           auto Unsubstituted = decodeMangledType(Demangled);
           if (!Unsubstituted)
             return {};
+
           auto Substituted = Unsubstituted->subst(*this, Subs);
-          auto FieldName = Field.getFieldName();
           if (FieldName.empty())
             FieldName = "<Redacted Field Name>";
           Fields.push_back({FieldName, Substituted});
